@@ -1,0 +1,30 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.pem
+*.key
+*.crt
+*.p12
+*.tfstate
+*.tfstate.*
+
+# Local AWS, agent, and editor state
+.aws/
+.agents/
+.codex/
+.idea/
+.vscode/
+AGENTS.md
+
+# Private operational copies and development artifacts
+outputs/
+work/
+docs/superpowers/
+
+# Test/runtime artifacts
+coverage/
+tmp/
+*.next
+

@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${FAKE_STATE_DIR:?FAKE_STATE_DIR is required}"
+FAKE_ROOT_DIR=$FAKE_STATE_DIR
+printf '%s\n' "$*" >>"$FAKE_ROOT_DIR/aws.log"
+
+arg_after() {
+  local wanted=$1
+  shift
+  while (($#)); do
+    if [[ $1 == "$wanted" ]]; then
+      printf '%s\n' "$2"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
+service=${1:-}
+operation=${2:-}
+
+if [[ $service == login ]]; then
+  touch "$FAKE_STATE_DIR/logged-in"
+  exit 0
+fi
+
+if [[ $service == sts && $operation == get-caller-identity ]]; then
+  if [[ -f $FAKE_STATE_DIR/auth-fails && ! -f $FAKE_STATE_DIR/logged-in ]]; then
+    exit 255
+  fi
+  printf '{"Account":"123456789012","Arn":"arn:aws:sts::123456789012:assumed-role/Test/UserId"}\n'
+  exit 0
+fi
+
+if [[ $service == ce && $operation == get-cost-and-usage ]]; then
+  [[ ! -f $FAKE_ROOT_DIR/cost-explorer-error ]] || exit 255
+  cat "$FAKE_ROOT_DIR/cost-explorer.json"
+  exit 0
+fi
+
+region=$(arg_after --region "$@" 2>/dev/null || printf 'ap-south-1\n')
+if [[ -d $FAKE_ROOT_DIR/regions/$region ]]; then
+  FAKE_STATE_DIR="$FAKE_ROOT_DIR/regions/$region"
+fi
+case "$region" in
+  ap-south-1) EXPECTED_INSTANCE=india-exit-mumbai ;;
+  eu-west-2) EXPECTED_INSTANCE=stream-exit-uk ;;
+  ca-central-1) EXPECTED_INSTANCE=stream-exit-canada ;;
+  ap-southeast-1) EXPECTED_INSTANCE=stream-exit-singapore ;;
+  *) EXPECTED_INSTANCE=unknown-exit-node ;;
+esac
+
+if [[ $service == cloudformation && $operation == describe-stacks ]]; then
+  if [[ " $* " == *"SchedulerGroupName"* ]]; then
+    printf 'region-relay-scheduler-group\n'
+  elif [[ " $* " == *"SchedulerExecutionRoleArn"* ]]; then
+    printf 'arn:aws:iam::123456789012:role/region-relay-scheduler-role\n'
+  else
+    printf '{"Stacks":[{"StackStatus":"CREATE_COMPLETE"}]}\n'
+  fi
+  exit 0
+fi
+
+if [[ $service == scheduler ]]; then
+  case "$operation" in
+    get-schedule)
+      [[ -f $FAKE_STATE_DIR/schedule ]] || exit 254
+      if [[ " $* " == *" ScheduleExpression "* ]]; then
+        cat "$FAKE_STATE_DIR/schedule"
+      else
+        printf '{"Name":"region-relay-auto-down"}\n'
+      fi
+      ;;
+    create-schedule|update-schedule)
+      expression=$(arg_after --schedule-expression "$@")
+      printf '%s\n' "$expression" >"$FAKE_STATE_DIR/schedule"
+      printf '{"ScheduleArn":"arn:aws:scheduler:ap-south-1:123456789012:schedule/region-relay-scheduler-group/region-relay-auto-down"}\n'
+      ;;
+    delete-schedule)
+      rm -f "$FAKE_STATE_DIR/schedule"
+      ;;
+    *)
+      printf 'fake-aws: unsupported command: %s\n' "$*" >&2
+      exit 2
+      ;;
+  esac
+  exit 0
+fi
+
+[[ $service == lightsail ]] || exit 2
+
+case "$operation" in
+  get-regions)
+    [[ ! -f $FAKE_STATE_DIR/no-zone ]] && printf '%sa\n' "$region" || printf 'None\n'
+    ;;
+  get-bundles)
+    if [[ -f $FAKE_STATE_DIR/no-bundle ]]; then
+      printf 'None\n'
+    elif [[ $region != ap-south-1 && " $* " == *"nano_3_1"* ]]; then
+      printf 'None\n'
+    elif [[ " $* " == *"transferPerMonthInGb"* ]]; then
+      if [[ $region == ap-south-1 ]]; then
+        printf '512\t5.0\n'
+      else
+        printf '1024\t5.0\n'
+      fi
+    elif [[ $region != ap-south-1 ]]; then
+      printf 'nano_3_0\n'
+    else
+      printf 'nano_3_1\n'
+    fi
+    ;;
+  copy-snapshot)
+    [[ ! -f $FAKE_STATE_DIR/copy-error ]] || exit 255
+    snapshot=$(arg_after --target-snapshot-name "$@")
+    printf '%s\n' "$snapshot" >>"$FAKE_STATE_DIR/snapshots"
+    ;;
+  get-instance)
+    [[ -f $FAKE_STATE_DIR/instance ]] || exit 254
+    if [[ " $* " == *" instance.publicIpAddress "* ]]; then
+      cat "$FAKE_STATE_DIR/public-ip"
+    else
+      printf '%s\n' "$(arg_after --instance-name "$@")"
+    fi
+    ;;
+  get-instance-state)
+    [[ -f $FAKE_STATE_DIR/instance ]] || exit 254
+    cat "$FAKE_STATE_DIR/instance"
+    ;;
+  get-instance-snapshots)
+    if [[ ! -s $FAKE_STATE_DIR/snapshots ]]; then
+      printf 'None\n'
+    elif [[ " $* " == *"region-relay-transfer-"* ]]; then
+      grep '^region-relay-transfer-' "$FAKE_STATE_DIR/snapshots" || printf 'None\n'
+    elif [[ " $* " == *"[-1].name"* ]]; then
+      tail -n 1 "$FAKE_STATE_DIR/snapshots"
+    else
+      cat "$FAKE_STATE_DIR/snapshots"
+    fi
+    ;;
+  create-instance-snapshot)
+    snapshot=$(arg_after --instance-snapshot-name "$@")
+    printf '%s\n' "$snapshot" >>"$FAKE_STATE_DIR/snapshots"
+    ;;
+  get-instance-snapshot)
+    [[ -f $FAKE_STATE_DIR/snapshot-error ]] && printf 'error\n' || printf 'available\n'
+    ;;
+  delete-instance-snapshot)
+    snapshot=$(arg_after --instance-snapshot-name "$@")
+    grep -Fvx "$snapshot" "$FAKE_STATE_DIR/snapshots" >"$FAKE_STATE_DIR/snapshots.next" || true
+    mv "$FAKE_STATE_DIR/snapshots.next" "$FAKE_STATE_DIR/snapshots"
+    ;;
+  get-static-ips)
+    if [[ " $* " == *"length(staticIps)"* ]]; then
+      count=0
+      [[ -s $FAKE_STATE_DIR/static-ip ]] && count=$((count + 1))
+      [[ -s $FAKE_STATE_DIR/allocated-static-ips ]] && count=$((count + $(wc -l <"$FAKE_STATE_DIR/allocated-static-ips")))
+      printf '%s\n' "$count"
+    elif [[ " $* " == *"starts_with(name"* ]]; then
+      [[ -s $FAKE_STATE_DIR/static-ip ]] && while read -r name; do printf '%s\t%s\n' "$name" "$EXPECTED_INSTANCE"; done <"$FAKE_STATE_DIR/static-ip"
+      if [[ -s $FAKE_STATE_DIR/allocated-static-ips ]]; then
+        awk -F '\t' -v instance="$EXPECTED_INSTANCE" '$1 ~ /-hunt-/ || $1 ~ /^india-exit-mumbai-ip/ || $3 == instance {print $1 "\t" $3}' "$FAKE_STATE_DIR/allocated-static-ips"
+      fi
+    elif [[ " $* " == *"attachedTo=="* ]]; then
+      [[ -s $FAKE_STATE_DIR/static-ip ]] && cat "$FAKE_STATE_DIR/static-ip"
+      if [[ -s $FAKE_STATE_DIR/allocated-static-ips ]]; then
+        awk -F '\t' -v instance="$EXPECTED_INSTANCE" '$3 == instance {print $1}' "$FAKE_STATE_DIR/allocated-static-ips"
+      fi
+      [[ -s $FAKE_STATE_DIR/static-ip || -s $FAKE_STATE_DIR/allocated-static-ips ]] || printf 'None\n'
+    else
+      printf 'None\n'
+    fi
+    ;;
+  allocate-static-ip)
+    name=$(arg_after --static-ip-name "$@")
+    ip=$(head -n1 "$FAKE_STATE_DIR/candidate-ips")
+    tail -n +2 "$FAKE_STATE_DIR/candidate-ips" >"$FAKE_STATE_DIR/candidate-ips.next"
+    mv "$FAKE_STATE_DIR/candidate-ips.next" "$FAKE_STATE_DIR/candidate-ips"
+    printf '%s\t%s\t-\n' "$name" "$ip" >>"$FAKE_STATE_DIR/allocated-static-ips"
+    ;;
+  get-static-ip)
+    name=$(arg_after --static-ip-name "$@")
+    if [[ " $* " == *"staticIp.attachedTo"* ]]; then
+      awk -F '\t' -v wanted="$name" '$1 == wanted {print $3}' "$FAKE_STATE_DIR/allocated-static-ips"
+    else
+      awk -F '\t' -v wanted="$name" '$1 == wanted {print $2}' "$FAKE_STATE_DIR/allocated-static-ips"
+    fi
+    ;;
+  tag-resource)
+    :
+    ;;
+  attach-static-ip)
+    name=$(arg_after --static-ip-name "$@")
+    instance=$(arg_after --instance-name "$@")
+    awk -F '\t' -v OFS='\t' -v wanted="$name" -v instance="$instance" '$1 == wanted {$3=instance} {print}' "$FAKE_STATE_DIR/allocated-static-ips" >"$FAKE_STATE_DIR/allocated-static-ips.next"
+    mv "$FAKE_STATE_DIR/allocated-static-ips.next" "$FAKE_STATE_DIR/allocated-static-ips"
+    ;;
+  detach-static-ip)
+    name=$(arg_after --static-ip-name "$@")
+    if [[ -s $FAKE_STATE_DIR/static-ip ]] && grep -Fx "$name" "$FAKE_STATE_DIR/static-ip" >/dev/null; then
+      : >"$FAKE_STATE_DIR/static-ip"
+    elif [[ -s $FAKE_STATE_DIR/allocated-static-ips ]]; then
+      awk -F '\t' -v OFS='\t' -v wanted="$name" '$1 == wanted {$3="-"} {print}' "$FAKE_STATE_DIR/allocated-static-ips" >"$FAKE_STATE_DIR/allocated-static-ips.next"
+      mv "$FAKE_STATE_DIR/allocated-static-ips.next" "$FAKE_STATE_DIR/allocated-static-ips"
+    fi
+    ;;
+  release-static-ip)
+    name=$(arg_after --static-ip-name "$@")
+    if [[ -s $FAKE_STATE_DIR/static-ip ]] && grep -Fx "$name" "$FAKE_STATE_DIR/static-ip" >/dev/null; then
+      : >"$FAKE_STATE_DIR/static-ip"
+    fi
+    if [[ -s $FAKE_STATE_DIR/allocated-static-ips ]]; then
+      awk -F '\t' -v wanted="$name" '$1 != wanted {print}' "$FAKE_STATE_DIR/allocated-static-ips" >"$FAKE_STATE_DIR/allocated-static-ips.next"
+      mv "$FAKE_STATE_DIR/allocated-static-ips.next" "$FAKE_STATE_DIR/allocated-static-ips"
+    fi
+    ;;
+  delete-instance)
+    [[ ! -f $FAKE_STATE_DIR/delete-error ]] || exit 255
+    rm -f "$FAKE_STATE_DIR/instance"
+    ;;
+  create-instances-from-snapshot)
+    [[ ! -f $FAKE_STATE_DIR/create-error ]] || exit 255
+    printf 'running\n' >"$FAKE_STATE_DIR/instance"
+    if [[ -f $FAKE_STATE_DIR/next-public-ip ]]; then
+      cp "$FAKE_STATE_DIR/next-public-ip" "$FAKE_STATE_DIR/public-ip"
+    else
+      printf '203.0.113.20\n' >"$FAKE_STATE_DIR/public-ip"
+    fi
+    ;;
+  get-instance-port-states)
+    if [[ " $* " == *"length(portStates"* ]]; then
+      [[ -f $FAKE_STATE_DIR/ports-closed ]] && printf '0\n' || printf '2\n'
+    elif [[ ! -f $FAKE_STATE_DIR/ports-closed ]]; then
+      printf '22\t22\ttcp\n8\t-1\ticmp\n'
+    fi
+    ;;
+  close-instance-public-ports)
+    count_file="$FAKE_STATE_DIR/ports-close-count"
+    count=0
+    [[ -f $count_file ]] && count=$(cat "$count_file")
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$count_file"
+    if [[ $count -ge 2 ]]; then
+      touch "$FAKE_STATE_DIR/ports-closed"
+    fi
+    ;;
+  stop-instance)
+    printf 'stopped\n' >"$FAKE_STATE_DIR/instance"
+    ;;
+  start-instance)
+    printf 'running\n' >"$FAKE_STATE_DIR/instance"
+    cp "$FAKE_STATE_DIR/next-public-ip" "$FAKE_STATE_DIR/public-ip"
+    ;;
+  *)
+    printf 'fake-aws: unsupported command: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac

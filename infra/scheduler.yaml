@@ -1,0 +1,79 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  One-time Lightsail shutdown timer - uses a tag-scoped Scheduler role so only
+  RegionRelay exit nodes can be deleted.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: script creates one schedule in dedicated group -> Scheduler assumes role -> Lightsail DeleteInstance
+    must:
+      - deploy in same Region as the Lightsail instance
+      - keep role trust scoped to this schedule group and account
+      - keep delete permission restricted by ManagedBy resource tag
+
+Parameters:
+  ManagedByTagValue:
+    Type: String
+    Default: region-relay
+    AllowedPattern: '^[A-Za-z0-9._:/=+@-]{1,256}$'
+    Description: ManagedBy tag required on a Lightsail instance before Scheduler may delete it.
+
+Resources:
+  ShutdownScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: isolates lifecycle timers so role trust can use an exact schedule-group ARN
+        must:
+          - contain only exit-node lifecycle schedules
+        mutable: must-never-change
+    Properties:
+      Name: !Sub '${AWS::StackName}-group'
+      Tags:
+        - Key: ManagedBy
+          Value: region-relay
+
+  SchedulerExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: lets Scheduler delete the tagged exit node directly without Lambda or stored credentials
+        must:
+          - trust only scheduler.amazonaws.com from this account and exact schedule group
+          - permit only lightsail:DeleteInstance on tagged instances in this Region
+        mutable: change-with-constraints
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SchedulerFromDedicatedGroup
+            Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn: !GetAtt ShutdownScheduleGroup.Arn
+      Policies:
+        - PolicyName: DeleteTaggedLightsailExitNode
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DeleteTaggedLightsailInstance
+                Effect: Allow
+                Action: lightsail:DeleteInstance
+                Resource: !Sub 'arn:${AWS::Partition}:lightsail:${AWS::Region}:${AWS::AccountId}:Instance/*'
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/ManagedBy: !Ref ManagedByTagValue
+
+Outputs:
+  SchedulerExecutionRoleArn:
+    Description: Role ARN passed to one-time EventBridge Scheduler targets.
+    Value: !GetAtt SchedulerExecutionRole.Arn
+  SchedulerGroupName:
+    Description: Dedicated group where the lifecycle script creates its one-time schedule.
+    Value: !Ref ShutdownScheduleGroup
