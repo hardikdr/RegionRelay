@@ -89,6 +89,12 @@ releases every rejected automation-owned address:
   hunt-static-ip --prefix 203.0.113. --max-attempts 5
 ```
 
+`--max-attempts` accepts 1 through 400 and defaults to 20. Larger hunts make
+more allocation API calls and can take several minutes; rejected candidates
+are released after each batch. In an AWS role environment such as CodeBuild,
+set `VPN_AWS_PROFILE` to the empty string so the CLI uses ambient credentials
+and never attempts an interactive `aws login`.
+
 Use prefixes that can actually be allocated in the selected AWS Region; the
 documentation prefix above is intentionally non-routable. Unattached static
 IPv4 addresses incur hourly charges. Global `down` releases automation-owned

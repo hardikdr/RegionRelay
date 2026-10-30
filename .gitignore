@@ -27,4 +27,5 @@ docs/superpowers/
 coverage/
 tmp/
 *.next
-
+__pycache__/
+*.pyc

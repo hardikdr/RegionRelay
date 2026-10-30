@@ -31,7 +31,9 @@ identifiable, and compatibility with external services is not guaranteed.
 scripts/region-relay.sh       Lifecycle CLI
 scripts/bootstrap-tailscale-exit-node.sh Initial Linux/Tailscale setup
 infra/scheduler.yaml                     Optional deletion-timer stack
+opsy/                                    Private Region Relay Alexa skill, runner, and stack
 docs/aws-account-prerequisites.md        Account, Region, SCP, and IAM setup
+docs/alexa-opsy.md                        Alexa Region Relay deployment and test guide
 docs/operations.md                       Commands and recovery procedures
 tests/                                   Offline lifecycle test suite
 ```
@@ -120,8 +122,19 @@ Detailed commands and safety checks are in
 ./scripts/region-relay.sh --country canada schedule-down 2
 ```
 
+Static-IP hunts accept from 1 through 400 candidates and default to 20. In an
+AWS role environment such as CodeBuild, set `VPN_AWS_PROFILE` to the empty
+string so the CLI uses ambient role credentials instead of interactive login.
+
 Read [Operations](docs/operations.md) before using static-IP or recovery
 commands.
+
+## Alexa voice control
+
+The optional private **Region Relay** custom skill can start RegionRelay jobs and report
+their status through Alexa. Long lifecycle operations run asynchronously in
+CodeBuild, while Alexa returns immediately. See the complete
+[Alexa Region Relay deployment guide](docs/alexa-opsy.md).
 
 ## Costs
 

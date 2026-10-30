@@ -1,0 +1,345 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Private Alexa Region Relay control plane. Alexa starts validated,
+  asynchronous CodeBuild lifecycle jobs and reads current Lightsail status.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: Alexa custom skill -> short Python Lambda -> bounded CodeBuild job -> RegionRelay CLI -> Lightsail
+    must:
+      - keep Alexa invocation scoped to the configured Skill ID
+      - keep Lightsail mutations out of the Alexa Lambda role
+      - use IAM roles and never store AWS access keys
+      - retain the canonical RegionRelay snapshot during global down
+
+Parameters:
+  AlexaSkillId:
+    Type: String
+    AllowedPattern: '^amzn1\.ask\.skill\.[A-Za-z0-9-]+$'
+    Description: Skill ID from the Alexa Developer Console.
+  ExpectedAwsAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: Account ID RegionRelay must verify before making changes.
+  TargetIpPrefixes:
+    Type: String
+    AllowedPattern: '^[0-9.]+(,[0-9.]+)*$'
+    Description: Comma-separated literal IPv4 prefixes accepted by the hunt, with no spaces.
+  RunnerSourceBucket:
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+    Description: Existing private S3 bucket containing the packaged runner source.
+  RunnerSourceKey:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9!_.*''()/\-]+$'
+    Description: S3 object key for the packaged RegionRelay runner zip.
+
+Resources:
+  AlexaLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: bounds retention for Alexa request and AWS control errors
+        must:
+          - never log credentials or IP hunt prefixes
+        mutability: change-with-constraints
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-alexa'
+      RetentionInDays: 30
+
+  RunnerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: preserves lifecycle command output for status diagnosis without unlimited retention
+        must:
+          - never contain AWS credentials
+        mutability: change-with-constraints
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${AWS::StackName}-runner'
+      RetentionInDays: 30
+
+  AlexaFunctionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: gives the voice adapter only job-control and read-only status permissions
+        must:
+          - never grant Lightsail mutation actions
+          - restrict CodeBuild actions to this stack's runner project
+        mutability: change-with-constraints
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: OpsyVoiceControl
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteFunctionLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-alexa:*'
+              - Sid: TraceFunction
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+              - Sid: ControlRunnerProject
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:ListBuildsForProject
+                  - codebuild:BatchGetBuilds
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-runner'
+                  - !Sub 'arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:build/${AWS::StackName}-runner:*'
+              - Sid: ReadManagedRegions
+                Effect: Allow
+                Action:
+                  - lightsail:GetInstance
+                  - lightsail:GetStaticIps
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion:
+                      - ap-south-1
+                      - eu-west-2
+                      - ca-central-1
+                      - ap-southeast-1
+
+  RunnerRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: runs only the checked-in RegionRelay lifecycle with source and Region boundaries
+        must:
+          - read only the exact packaged runner object
+          - allow only RegionRelay's required Lightsail actions
+          - limit Lightsail API calls to the four supported Regions
+        mutability: change-with-constraints
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-runner'
+      Policies:
+        - PolicyName: RunRegionRelay
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadPackagedRunner
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${RunnerSourceBucket}/${RunnerSourceKey}'
+              - Sid: InspectRunnerBucket
+                Effect: Allow
+                Action:
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${RunnerSourceBucket}'
+              - Sid: WriteBuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-runner:*'
+              - Sid: RegionRelayLightsailLifecycle
+                Effect: Allow
+                Action:
+                  - lightsail:AllocateStaticIp
+                  - lightsail:AttachStaticIp
+                  - lightsail:CloseInstancePublicPorts
+                  - lightsail:CopySnapshot
+                  - lightsail:CreateInstanceSnapshot
+                  - lightsail:CreateInstancesFromSnapshot
+                  - lightsail:DeleteInstance
+                  - lightsail:DeleteInstanceSnapshot
+                  - lightsail:DetachStaticIp
+                  - lightsail:GetBundles
+                  - lightsail:GetInstance
+                  - lightsail:GetInstancePortStates
+                  - lightsail:GetInstanceSnapshot
+                  - lightsail:GetInstanceSnapshots
+                  - lightsail:GetInstanceState
+                  - lightsail:GetRegions
+                  - lightsail:GetStaticIp
+                  - lightsail:GetStaticIps
+                  - lightsail:ReleaseStaticIp
+                  - lightsail:StartInstance
+                  - lightsail:StopInstance
+                  - lightsail:TagResource
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion:
+                      - ap-south-1
+                      - eu-west-2
+                      - ca-central-1
+                      - ap-southeast-1
+
+  RunnerProject:
+    Type: AWS::CodeBuild::Project
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: gives long snapshot and IP-hunt operations an asynchronous bounded runtime
+        must:
+          - use the dedicated RunnerRole
+          - keep privileged mode disabled
+          - accept target prefixes only from stack configuration
+        mutability: change-with-constraints
+    Properties:
+      Name: !Sub '${AWS::StackName}-runner'
+      ServiceRole: !GetAtt RunnerRole.Arn
+      TimeoutInMinutes: 60
+      QueuedTimeoutInMinutes: 30
+      ConcurrentBuildLimit: 1
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Source:
+        Type: S3
+        Location: !Sub '${RunnerSourceBucket}/${RunnerSourceKey}'
+        BuildSpec: opsy/runner/buildspec.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:8.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        EnvironmentVariables:
+          - Name: VPN_EXPECTED_ACCOUNT
+            Type: PLAINTEXT
+            Value: !Ref ExpectedAwsAccountId
+          - Name: OPSY_TARGET_PREFIXES
+            Type: PLAINTEXT
+            Value: !Ref TargetIpPrefixes
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref RunnerLogGroup
+          StreamName: opsy
+
+  AlexaFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: returns within Alexa's request window while dispatching lifecycle work asynchronously
+        must:
+          - validate the Skill ID in the request and Lambda permission
+          - never receive target prefixes or arbitrary commands from voice slots
+          - keep timeout below the Alexa response ceiling
+        mutability: change-with-constraints
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-alexa'
+      CodeUri: .
+      Handler: skill.handler.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      MemorySize: 256
+      Timeout: 7
+      Tracing: Active
+      Role: !GetAtt AlexaFunctionRole.Arn
+      Environment:
+        Variables:
+          ALEXA_SKILL_ID: !Ref AlexaSkillId
+          CODEBUILD_PROJECT_NAME: !Sub '${AWS::StackName}-runner'
+
+  AlexaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: lets only Alexa requests carrying this private Skill ID invoke the function
+        must:
+          - retain EventSourceToken scoping to AlexaSkillId
+        mutability: must-never-weaken
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AlexaFunction
+      Principal: alexa-appkit.amazon.com
+      EventSourceToken: !Ref AlexaSkillId
+
+  AlexaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: surfaces any voice adapter error instead of relying only on log review
+        must:
+          - track only this stack's Alexa function
+        mutability: change-with-constraints
+    Properties:
+      AlarmDescription: Region Relay Alexa Lambda produced an error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AlexaFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  RunnerFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: makes a failed lifecycle job visible even when the user does not ask Alexa for status
+        must:
+          - track only this stack's CodeBuild project
+        mutability: change-with-constraints
+    Properties:
+      AlarmDescription: Region Relay runner build failed.
+      Namespace: AWS/CodeBuild
+      MetricName: FailedBuilds
+      Dimensions:
+        - Name: ProjectName
+          Value: !Ref RunnerProject
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  AlexaFunctionArn:
+    Description: Paste this ARN into the Alexa custom skill endpoint.
+    Value: !GetAtt AlexaFunction.Arn
+  RunnerProjectName:
+    Description: Asynchronous RegionRelay CodeBuild project used by Region Relay.
+    Value: !Ref RunnerProject
+  AlexaErrorAlarmName:
+    Description: CloudWatch alarm for Alexa Lambda errors.
+    Value: !Ref AlexaErrorAlarm
+  RunnerFailureAlarmName:
+    Description: CloudWatch alarm for failed RegionRelay jobs.
+    Value: !Ref RunnerFailureAlarm

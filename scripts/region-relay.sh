@@ -4,7 +4,7 @@ set -euo pipefail
 # Lifecycle helper for regional Amazon Lightsail Tailscale exit nodes.
 # No AWS or Tailscale credentials are stored by this script.
 
-PROFILE=${VPN_AWS_PROFILE:-region-relay}
+PROFILE=${VPN_AWS_PROFILE-region-relay}
 COUNTRY=${VPN_COUNTRY:-india}
 COUNTRY_EXPLICIT=false
 REGION=ap-south-1
@@ -125,16 +125,32 @@ Options:
   --prefix PREFIX
            Accepted IPv4 text prefix for hunt-static-ip, for example 43.
   --max-attempts N
-           Maximum static IPv4 candidates for hunt-static-ip (1-20; default 20).
+           Maximum static IPv4 candidates for hunt-static-ip (1-400; default 20).
 
 Environment overrides:
   VPN_AWS_PROFILE, VPN_AWS_REGION, VPN_AWS_AZ, VPN_INSTANCE_NAME,
-  VPN_BUNDLE_ID, VPN_SNAPSHOT_PREFIX, VPN_TAILSCALE_HOSTNAME
+  VPN_BUNDLE_ID, VPN_SNAPSHOT_PREFIX, VPN_TAILSCALE_HOSTNAME,
+  VPN_SOUND_MODE (auto, bell, or off; default auto)
 EOF
 }
 
 log() {
   printf '%s\n' "$*"
+}
+
+play_success_sound() {
+  case ${VPN_SOUND_MODE:-auto} in
+    auto)
+      if command -v afplay >/dev/null 2>&1 && [[ -r /System/Library/Sounds/Glass.aiff ]]; then
+        afplay /System/Library/Sounds/Glass.aiff >/dev/null 2>&1 || printf '\a'
+      else
+        printf '\a'
+      fi
+      ;;
+    bell) printf '\a' ;;
+    off) ;;
+    *) printf '\a' ;;
+  esac
 }
 
 die() {
@@ -152,26 +168,36 @@ confirm() {
   [[ $answer == y || $answer == Y || $answer == yes || $answer == YES ]] || die 'Cancelled.'
 }
 
+aws_command() {
+  local service=$1
+  shift
+  if [[ -n $PROFILE ]]; then
+    "$AWS_BIN" "$service" "$@" --profile "$PROFILE"
+  else
+    "$AWS_BIN" "$service" "$@"
+  fi
+}
+
 aws_ls() {
-  "$AWS_BIN" lightsail "$@" --profile "$PROFILE" --region "$REGION" --no-cli-pager
+  aws_command lightsail "$@" --region "$REGION" --no-cli-pager
 }
 
 aws_ls_region() {
   local region=$1
   shift
-  "$AWS_BIN" lightsail "$@" --profile "$PROFILE" --region "$region" --no-cli-pager
+  aws_command lightsail "$@" --region "$region" --no-cli-pager
 }
 
 aws_ce() {
-  "$AWS_BIN" ce "$@" --profile "$PROFILE" --region "$BILLING_REGION" --no-cli-pager
+  aws_command ce "$@" --region "$BILLING_REGION" --no-cli-pager
 }
 
 aws_scheduler() {
-  "$AWS_BIN" scheduler "$@" --profile "$PROFILE" --region "$REGION" --no-cli-pager
+  aws_command scheduler "$@" --region "$REGION" --no-cli-pager
 }
 
 aws_cf() {
-  "$AWS_BIN" cloudformation "$@" --profile "$PROFILE" --region "$REGION" --no-cli-pager
+  aws_command cloudformation "$@" --region "$REGION" --no-cli-pager
 }
 
 scheduler_stack_output() {
@@ -219,10 +245,13 @@ show_pending_schedule() {
 
 authenticate() {
   local identity account arn
-  if ! identity=$("$AWS_BIN" sts get-caller-identity --profile "$PROFILE" --region "$REGION" --output json --no-cli-pager 2>/dev/null); then
+  if ! identity=$(aws_command sts get-caller-identity --region "$REGION" --output json --no-cli-pager 2>/dev/null); then
+    if [[ -z $PROFILE ]]; then
+      die 'Ambient AWS credentials are missing or expired. Refresh the IAM role credentials and retry.'
+    fi
     confirm "AWS session for profile '$PROFILE' is missing or expired. Open AWS browser login?"
     "$AWS_BIN" login --profile "$PROFILE"
-    identity=$("$AWS_BIN" sts get-caller-identity --profile "$PROFILE" --region "$REGION" --output json --no-cli-pager) || \
+    identity=$(aws_command sts get-caller-identity --region "$REGION" --output json --no-cli-pager) || \
       die "AWS login did not produce usable credentials for '$PROFILE'."
   fi
 
@@ -554,8 +583,8 @@ do_hunt_static_ip() {
   instance_exists || die "'$INSTANCE_NAME' does not exist. Run up first."
   [[ $(instance_state) == running ]] || die "'$INSTANCE_NAME' must be running before hunting for a static IP."
   ((${#HUNT_PREFIXES[@]})) || die 'hunt-static-ip requires at least one --prefix, for example: --prefix 43.'
-  [[ $HUNT_MAX_ATTEMPTS =~ ^[0-9]+$ ]] && ((HUNT_MAX_ATTEMPTS >= 1 && HUNT_MAX_ATTEMPTS <= 20)) || \
-    die '--max-attempts must be an integer from 1 through 20.'
+  [[ $HUNT_MAX_ATTEMPTS =~ ^[0-9]+$ ]] && ((HUNT_MAX_ATTEMPTS >= 1 && HUNT_MAX_ATTEMPTS <= 400)) || \
+    die '--max-attempts must be an integer from 1 through 400.'
   for candidate_ip in "${HUNT_PREFIXES[@]}"; do
     [[ $candidate_ip =~ ^[0-9.]+$ && $candidate_ip == *.* ]] || \
       die "Invalid IPv4 prefix '$candidate_ip'. Use a literal prefix such as 43.204."
@@ -571,6 +600,7 @@ do_hunt_static_ip() {
         fi
         release_managed_static_ips "$existing_name"
         log "An attached static IPv4 already matches: $existing_ip ($existing_name)"
+        play_success_sound
         return 0
       fi
     done
@@ -629,6 +659,7 @@ do_hunt_static_ip() {
       log "Attached resource: $selected_name"
       log "The down command will detach and permanently release this static IP."
       optional_tailscale_check
+      play_success_sound
       return 0
     fi
 
@@ -956,7 +987,7 @@ while (($#)); do
       ;;
     --max-attempts)
       shift
-      (($#)) || die '--max-attempts requires a value from 1 through 20.'
+      (($#)) || die '--max-attempts requires a value from 1 through 400.'
       HUNT_MAX_ATTEMPTS=$1
       ;;
     schedule-down)

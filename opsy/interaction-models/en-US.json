@@ -1,0 +1,165 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "region relay",
+      "intents": [
+        {
+          "name": "StartExitNodeIntent",
+          "slots": [
+            {
+              "name": "country",
+              "type": "REGION_RELAY_COUNTRY"
+            }
+          ],
+          "samples": [
+            "start the exit node in {country}",
+            "bring up the exit node in {country}",
+            "start my exit node in {country}",
+            "bring up {country}",
+            "start in {country}"
+          ]
+        },
+        {
+          "name": "StartIpHuntIntent",
+          "slots": [
+            {
+              "name": "country",
+              "type": "REGION_RELAY_COUNTRY"
+            },
+            {
+              "name": "attempts",
+              "type": "AMAZON.NUMBER"
+            }
+          ],
+          "samples": [
+            "hunt for my target IP in {country}",
+            "hunt for my target IP in {country} up to {attempts} times",
+            "start hunting in {country}",
+            "start the scanning sequence in {country}",
+            "scan for the IP address {attempts} times in {country}",
+            "look for my configured IP in {country}",
+            "start an IP hunt in {country}"
+          ]
+        },
+        {
+          "name": "RotatePublicIpIntent",
+          "slots": [
+            {
+              "name": "country",
+              "type": "REGION_RELAY_COUNTRY"
+            }
+          ],
+          "samples": [
+            "rotate the public IP in {country}",
+            "change the public IP in {country}",
+            "get a new public IP in {country}",
+            "rotate the IP for {country}"
+          ]
+        },
+        {
+          "name": "ExitNodeStatusIntent",
+          "samples": [
+            "check the exit node",
+            "check the job",
+            "check the script",
+            "what is the current public IP",
+            "what public IP do I have",
+            "did the hunt find an IP",
+            "has the IP hunt finished",
+            "what is the status",
+            "status"
+          ]
+        },
+        {
+          "name": "StopExitNodeIntent",
+          "samples": [
+            "bring down the exit node",
+            "stop the exit node",
+            "delete the exit node",
+            "shut down Region Relay",
+            "turn off the exit node"
+          ]
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        }
+      ],
+      "types": [
+        {
+          "name": "REGION_RELAY_COUNTRY",
+          "values": [
+            {
+              "id": "india",
+              "name": {
+                "value": "India",
+                "synonyms": [
+                  "Mumbai"
+                ]
+              }
+            },
+            {
+              "id": "uk",
+              "name": {
+                "value": "United Kingdom",
+                "synonyms": [
+                  "UK",
+                  "Britain",
+                  "Great Britain",
+                  "London"
+                ]
+              }
+            },
+            {
+              "id": "canada",
+              "name": {
+                "value": "Canada",
+                "synonyms": []
+              }
+            },
+            {
+              "id": "singapore",
+              "name": {
+                "value": "Singapore",
+                "synonyms": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "dialog": {
+      "delegationStrategy": "SKILL_RESPONSE",
+      "intents": [
+        {
+          "name": "StopExitNodeIntent",
+          "delegationStrategy": "SKILL_RESPONSE",
+          "confirmationRequired": true,
+          "prompts": {
+            "confirmation": "Confirm.Intent.StopExitNode"
+          },
+          "slots": []
+        }
+      ]
+    },
+    "prompts": [
+      {
+        "id": "Confirm.Intent.StopExitNode",
+        "variations": [
+          {
+            "type": "PlainText",
+            "value": "Please confirm that you want me to bring down all RegionRelay exit nodes."
+          }
+        ]
+      }
+    ]
+  }
+}

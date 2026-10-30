@@ -133,6 +133,34 @@ test_expired_session_runs_aws_login_then_rechecks_identity() {
   [[ $(grep -c 'sts get-caller-identity' "$state/aws.log") -eq 2 ]] || fail 'AWS identity was not rechecked after login'
 }
 
+test_empty_profile_uses_ambient_iam_credentials() {
+  local state
+  state=$(new_state)
+  trap 'rm -rf "$state"' RETURN
+  printf 'running\n' >"$state/instance"
+  printf '203.0.113.44\n' >"$state/public-ip"
+  : >"$state/static-ip"
+  printf 'india-exit-mumbai-lifecycle-20261002T200000Z\n' >"$state/snapshots"
+
+  VPN_AWS_PROFILE= run_script "$state" --country india status >/dev/null
+
+  assert_contains "$state/aws.log" 'sts get-caller-identity'
+  assert_not_contains "$state/aws.log" '--profile'
+}
+
+test_expired_ambient_credentials_never_attempt_interactive_login() {
+  local state
+  state=$(new_state)
+  trap 'rm -rf "$state"' RETURN
+  touch "$state/auth-fails"
+
+  if VPN_AWS_PROFILE= run_script "$state" --yes --country india status >/dev/null 2>&1; then
+    fail 'ambient credential failure unexpectedly succeeded'
+  fi
+
+  assert_not_contains "$state/aws.log" 'login'
+}
+
 test_toggle_defaults_to_down_when_instance_exists() {
   local state
   state=$(new_state)
@@ -302,7 +330,7 @@ test_hunt_static_ip_attaches_match_and_releases_rejections() {
   printf '13.201.1.1\n15.206.1.2\n43.204.8.9\n65.0.1.3\n3.6.1.4\n' >"$state/candidate-ips"
   printf 'india-exit-mumbai-lifecycle-20261002T200000Z\n' >"$state/snapshots"
 
-  output=$(run_script "$state" --yes hunt-static-ip --prefix 43. --max-attempts 5)
+  output=$(run_script "$state" --yes hunt-static-ip --prefix 43. --max-attempts 400)
 
   [[ $(wc -l <"$state/allocated-static-ips" | tr -d ' ') == 1 ]] || fail 'hunt left rejected static IPs allocated'
   grep -F $'43.204.8.9\tindia-exit-mumbai' "$state/allocated-static-ips" >/dev/null || fail 'hunt did not attach the matching static IP'
@@ -311,6 +339,28 @@ test_hunt_static_ip_attaches_match_and_releases_rejections() {
   assert_contains "$state/aws.log" 'release-static-ip --static-ip-name india-exit-mumbai-hunt-test-run-1'
   assert_contains "$state/aws.log" 'attach-static-ip --static-ip-name india-exit-mumbai-hunt-test-run-3 --instance-name india-exit-mumbai'
   printf '%s\n' "$output" | grep -F 'Selected static IPv4: 43.204.8.9' >/dev/null || fail 'hunt did not report the selected address'
+}
+
+test_hunt_static_ip_can_select_candidate_twenty_one() {
+  local state output attempt
+  state=$(new_state)
+  trap 'rm -rf "$state"' RETURN
+  printf 'running\n' >"$state/instance"
+  printf '13.200.1.10\n' >"$state/public-ip"
+  : >"$state/static-ip"
+  : >"$state/allocated-static-ips"
+  : >"$state/candidate-ips"
+  for ((attempt=1; attempt<=20; attempt++)); do
+    printf '13.200.0.%s\n' "$attempt" >>"$state/candidate-ips"
+  done
+  printf '43.204.8.21\n' >>"$state/candidate-ips"
+  printf 'india-exit-mumbai-lifecycle-20261002T200000Z\n' >"$state/snapshots"
+
+  output=$(run_script "$state" --yes hunt-static-ip --prefix 43. --max-attempts 21)
+
+  grep -F $'43.204.8.21\tindia-exit-mumbai' "$state/allocated-static-ips" >/dev/null || fail 'hunt did not attach candidate 21'
+  [[ $(wc -l <"$state/allocated-static-ips" | tr -d ' ') == 1 ]] || fail 'extended hunt left rejected candidates allocated'
+  printf '%s\n' "$output" | grep -F 'Selected static IPv4: 43.204.8.21' >/dev/null || fail 'extended hunt did not report candidate 21'
 }
 
 test_hunt_static_ip_releases_everything_when_no_prefix_matches() {
@@ -810,6 +860,8 @@ test_down_reuses_ready_snapshot_and_releases_ip
 test_up_restores_latest_snapshot_without_static_ip_and_closes_ports
 test_rotate_releases_static_ip_and_changes_dynamic_ip
 test_expired_session_runs_aws_login_then_rechecks_identity
+test_empty_profile_uses_ambient_iam_credentials
+test_expired_ambient_credentials_never_attempt_interactive_login
 test_toggle_defaults_to_down_when_instance_exists
 test_down_without_ready_snapshot_never_deletes_instance_or_releases_ip
 test_snapshot_command_refreshes_snapshot_without_deleting_instance
@@ -819,6 +871,7 @@ test_schedule_down_replaces_existing_timer
 test_cancel_down_removes_timer
 test_down_cancels_timer_before_deleting_instance
 test_hunt_static_ip_attaches_match_and_releases_rejections
+test_hunt_static_ip_can_select_candidate_twenty_one
 test_hunt_static_ip_releases_everything_when_no_prefix_matches
 test_down_releases_attached_and_unattached_automation_static_ips
 test_down_cleans_legacy_automation_ips_when_vm_is_already_absent

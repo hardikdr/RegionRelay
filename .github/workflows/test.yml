@@ -20,3 +20,9 @@ jobs:
 
       - name: Run lifecycle tests
         run: ./tests/test-lifecycle.sh
+
+      - name: Run Region Relay Alexa runner tests
+        run: ./tests/test-opsy-runner.sh
+
+      - name: Run Region Relay Alexa Python tests
+        run: python3 -m unittest discover -s opsy/skill/tests -v
